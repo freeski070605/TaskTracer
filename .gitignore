@@ -1,0 +1,15 @@
+﻿node_modules
+.env
+.env.*
+!.env.example
+dist
+build
+.next
+out
+coverage
+.expo
+.expo-shared
+*.log
+.DS_Store
+.vscode
+.idea

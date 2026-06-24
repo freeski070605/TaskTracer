@@ -1,0 +1,25 @@
+{
+    "expo":  {
+                 "name":  "TaskTracer",
+                 "slug":  "tasktracer",
+                 "version":  "1.0.0",
+                 "sdkVersion":  "51.0.0",
+                 "orientation":  "portrait",
+                 "userInterfaceStyle":  "light",
+                 "extra":  {
+                               "apiUrl":  "http://localhost:4000/api"
+                           },
+                 "ios":  {
+                             "infoPlist":  {
+                                               "NSCameraUsageDescription":  "Allow TaskTracer to capture proof photos and scan QR codes.",
+                                               "NSPhotoLibraryUsageDescription":  "Allow TaskTracer to access your photo library for proof uploads."
+                                           }
+                         },
+                 "android":  {
+                                 "permissions":  [
+                                                     "CAMERA",
+                                                     "READ_MEDIA_IMAGES"
+                                                 ]
+                             }
+             }
+}

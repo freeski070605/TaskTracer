@@ -4,6 +4,7 @@ import helmet from 'helmet';
 import mongoose from 'mongoose';
 import cookieParser from 'cookie-parser';
 import { env } from './config/env';
+import { isOriginAllowed } from './config/cors';
 import { redis } from './config/redis';
 import routes from './routes';
 import { errorHandler } from './middleware/error';
@@ -17,15 +18,11 @@ export const createApp = () => {
   app.set('trust proxy', 1);
   app.disable('x-powered-by');
 
-  const corsOrigins = env.CORS_ORIGIN.split(',').map((origin) => origin.trim()).filter(Boolean);
-  const allowAll = corsOrigins.includes('*');
-
   app.use(helmet());
   app.use(
     cors({
       origin: (origin, callback) => {
-        if (!origin || allowAll) return callback(null, true);
-        if (corsOrigins.includes(origin)) return callback(null, true);
+        if (isOriginAllowed(origin)) return callback(null, true);
         return callback(new AppError('Not allowed by CORS', 403, 'CORS_BLOCKED'));
       },
       credentials: true,

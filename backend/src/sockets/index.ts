@@ -1,13 +1,16 @@
 ﻿import http from 'http';
 import { Server } from 'socket.io';
-import { env } from '../config/env';
+import { isOriginAllowed } from '../config/cors';
 import { initSocket } from '../services/socket.service';
 import { setupRedisSubscriber } from './events';
 
 export const setupSocket = (server: http.Server) => {
   const io = new Server(server, {
     cors: {
-      origin: env.CORS_ORIGIN,
+      origin: (origin, callback) => {
+        callback(null, isOriginAllowed(origin));
+      },
+      credentials: true,
     },
   });
 

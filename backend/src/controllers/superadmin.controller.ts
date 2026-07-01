@@ -1,9 +1,14 @@
 import { Request, Response } from 'express';
 import AuditLog from '../models/auditLog.model';
+import Duty from '../models/duty.model';
 import Company, { CompanyDocument } from '../models/company.model';
 import FinancialRecord from '../models/financialRecord.model';
+import Location from '../models/location.model';
+import Notification from '../models/notification.model';
+import Schedule from '../models/schedule.model';
 import Subscription, { SubscriptionDocument } from '../models/subscription.model';
 import Task from '../models/task.model';
+import TaskLog from '../models/taskLog.model';
 import User from '../models/user.model';
 import { cancelExistingSubscription } from '../services/square.service';
 import { createFinancialRecord } from '../services/financialRecord.service';
@@ -14,6 +19,7 @@ import {
   ensureUniqueOrganizationSlug,
   normalizeOrganizationName,
   serializeCompany,
+  slugifyOrganization,
   syncCompanyIdentity,
 } from '../utils/organization';
 
@@ -66,34 +72,67 @@ const serializeSubscription = (params: {
   };
 };
 
+const serializeFinancialRecord = (
+  record: {
+    _id?: unknown;
+    id?: string;
+    tenantId: string;
+    type: string;
+    amount: number;
+    currency: string;
+    status: string;
+    description: string;
+    referenceId?: string | null;
+    externalReferenceId?: string | null;
+    occurredAt: Date;
+    createdAt?: Date;
+    metadata?: Record<string, unknown>;
+  },
+  company?: { name?: string; slug?: string } | null,
+) => ({
+  id: record.id ?? String(record._id ?? ''),
+  tenantKey: record.tenantId,
+  organizationName: company?.name ?? record.tenantId,
+  organizationSlug: company?.slug ?? record.tenantId,
+  type: record.type,
+  amount: record.amount,
+  currency: record.currency,
+  status: record.status,
+  description: record.description,
+  referenceId: record.referenceId ?? null,
+  externalReferenceId: record.externalReferenceId ?? null,
+  occurredAt: record.occurredAt,
+  createdAt: record.createdAt ?? null,
+  metadata: record.metadata ?? {},
+});
+
+const enrichCompany = async (company: CompanyWithTimestamps) => {
+  const syncedCompany = await syncCompanyIdentity(company);
+  const [userCount, activeUserCount, taskCount, completedTaskCount, approvedTaskCount, subscription, lastAudit] =
+    await Promise.all([
+      User.countDocuments({ tenantId: syncedCompany.tenantId }),
+      User.countDocuments({ tenantId: syncedCompany.tenantId, isActive: true }),
+      Task.countDocuments({ tenantId: syncedCompany.tenantId }),
+      Task.countDocuments({ tenantId: syncedCompany.tenantId, status: 'completed' }),
+      Task.countDocuments({ tenantId: syncedCompany.tenantId, status: 'approved' }),
+      Subscription.findOne({ tenantId: syncedCompany.tenantId }).sort({ updatedAt: -1, createdAt: -1 }),
+      AuditLog.findOne({ tenantId: syncedCompany.tenantId }).sort({ createdAt: -1 }),
+    ]);
+
+  return {
+    ...serializeCompany(syncedCompany),
+    userCount,
+    activeUserCount,
+    taskCount,
+    completedTaskCount,
+    approvedTaskCount,
+    lastActivityAt: (lastAudit as { createdAt?: Date } | null)?.createdAt ?? null,
+    subscription: serializeSubscription({ company: syncedCompany, subscription: subscription as SubscriptionLike | null }),
+  };
+};
 export const listCompanies = asyncHandler(async (_req: Request, res: Response) => {
   const companies = await Company.find().sort({ createdAt: -1 });
-  const enrichedCompanies = await Promise.all(
-    companies.map(async (company) => {
-      const syncedCompany = await syncCompanyIdentity(company);
-      const [userCount, activeUserCount, taskCount, completedTaskCount, approvedTaskCount, subscription, lastAudit] =
-        await Promise.all([
-          User.countDocuments({ tenantId: syncedCompany.tenantId }),
-          User.countDocuments({ tenantId: syncedCompany.tenantId, isActive: true }),
-          Task.countDocuments({ tenantId: syncedCompany.tenantId }),
-          Task.countDocuments({ tenantId: syncedCompany.tenantId, status: 'completed' }),
-          Task.countDocuments({ tenantId: syncedCompany.tenantId, status: 'approved' }),
-          Subscription.findOne({ tenantId: syncedCompany.tenantId }).sort({ updatedAt: -1, createdAt: -1 }),
-          AuditLog.findOne({ tenantId: syncedCompany.tenantId }).sort({ createdAt: -1 }),
-        ]);
-
-      return {
-        ...serializeCompany(syncedCompany),
-        userCount,
-        activeUserCount,
-        taskCount,
-        completedTaskCount,
-        approvedTaskCount,
-        lastActivityAt: (lastAudit as { createdAt?: Date } | null)?.createdAt ?? null,
-        subscription: serializeSubscription({ company: syncedCompany as CompanyWithTimestamps, subscription: subscription as SubscriptionLike | null }),
-      };
-    }),
-  );
+  const enrichedCompanies = await Promise.all(companies.map((company) => enrichCompany(company as CompanyWithTimestamps)));
 
   res.json({ companies: enrichedCompanies });
 });
@@ -177,6 +216,42 @@ export const listSubscriptions = asyncHandler(async (_req: Request, res: Respons
   });
 });
 
+export const createCompany = asyncHandler(async (req: Request, res: Response) => {
+  const {
+    organizationName,
+    organizationSlug,
+    tenantId,
+    contactEmail,
+    plan,
+    isActive,
+  } = req.body as {
+    organizationName: string;
+    organizationSlug?: string;
+    tenantId?: string;
+    contactEmail: string;
+    plan?: BillingPlanKey;
+    isActive?: boolean;
+  };
+
+  const uniqueSlug = await ensureUniqueOrganizationSlug(organizationSlug ?? organizationName);
+  const resolvedTenantId = slugifyOrganization(tenantId?.trim() || uniqueSlug);
+  const existingTenant = await Company.findOne({ tenantId: resolvedTenantId }).select('_id');
+  if (existingTenant) {
+    throw new AppError('Tenant key already exists', 409, 'TENANT_EXISTS');
+  }
+
+  const company = await Company.create({
+    tenantId: resolvedTenantId,
+    slug: uniqueSlug,
+    name: organizationName,
+    normalizedName: normalizeOrganizationName(organizationName),
+    contactEmail,
+    plan: plan ?? 'starter',
+    isActive: isActive ?? true,
+  });
+
+  res.status(201).json({ company: await enrichCompany(company as CompanyWithTimestamps) });
+});
 export const updateCompany = asyncHandler(async (req: Request, res: Response) => {
   const { companyId } = req.params;
   const {
@@ -222,28 +297,40 @@ export const updateCompany = asyncHandler(async (req: Request, res: Response) =>
   await company.save();
   const syncedCompany = await syncCompanyIdentity(company);
 
-  const [userCount, activeUserCount, taskCount, completedTaskCount, approvedTaskCount, subscription] = await Promise.all([
-    User.countDocuments({ tenantId: syncedCompany.tenantId }),
-    User.countDocuments({ tenantId: syncedCompany.tenantId, isActive: true }),
-    Task.countDocuments({ tenantId: syncedCompany.tenantId }),
-    Task.countDocuments({ tenantId: syncedCompany.tenantId, status: 'completed' }),
-    Task.countDocuments({ tenantId: syncedCompany.tenantId, status: 'approved' }),
-    Subscription.findOne({ tenantId: syncedCompany.tenantId }).sort({ updatedAt: -1, createdAt: -1 }),
-  ]);
-
-  res.json({
-    company: {
-      ...serializeCompany(syncedCompany),
-      userCount,
-      activeUserCount,
-      taskCount,
-      completedTaskCount,
-      approvedTaskCount,
-      subscription: serializeSubscription({ company: syncedCompany as CompanyWithTimestamps, subscription: subscription as SubscriptionLike | null }),
-    },
-  });
+  res.json({ company: await enrichCompany(syncedCompany as CompanyWithTimestamps) });
 });
 
+export const deleteCompany = asyncHandler(async (req: Request, res: Response) => {
+  const { companyId } = req.params;
+  const company = await Company.findById(companyId);
+  if (!company) {
+    throw new AppError('Workspace not found', 404, 'WORKSPACE_NOT_FOUND');
+  }
+
+  const relatedCounts = await Promise.all([
+    User.countDocuments({ tenantId: company.tenantId }),
+    Task.countDocuments({ tenantId: company.tenantId }),
+    TaskLog.countDocuments({ tenantId: company.tenantId }),
+    Duty.countDocuments({ tenantId: company.tenantId }),
+    Location.countDocuments({ tenantId: company.tenantId }),
+    Schedule.countDocuments({ tenantId: company.tenantId }),
+    Subscription.countDocuments({ tenantId: company.tenantId }),
+    FinancialRecord.countDocuments({ tenantId: company.tenantId }),
+    Notification.countDocuments({ tenantId: company.tenantId }),
+    AuditLog.countDocuments({ tenantId: company.tenantId }),
+  ]);
+
+  if (relatedCounts.some((count) => count > 0)) {
+    throw new AppError(
+      'Workspace has related data. Suspend it instead, or remove related users/tasks/billing records first.',
+      409,
+      'WORKSPACE_HAS_RELATED_DATA',
+    );
+  }
+
+  await company.deleteOne();
+  res.status(204).send();
+});
 export const updateCompanySubscription = asyncHandler(async (req: Request, res: Response) => {
   const { companyId } = req.params;
   const {
@@ -317,27 +404,7 @@ export const listFinancialRecords = asyncHandler(async (req: Request, res: Respo
   const companies = await Company.find({ tenantId: { $in: tenantIds } }).lean();
   const companyMap = new Map(companies.map((company) => [company.tenantId, company]));
 
-  res.json({
-    records: records.map((record) => {
-      const company = companyMap.get(record.tenantId);
-      return {
-        id: String(record._id),
-        tenantKey: record.tenantId,
-        organizationName: company?.name ?? record.tenantId,
-        organizationSlug: company?.slug ?? record.tenantId,
-        type: record.type,
-        amount: record.amount,
-        currency: record.currency,
-        status: record.status,
-        description: record.description,
-        referenceId: record.referenceId ?? null,
-        externalReferenceId: record.externalReferenceId ?? null,
-        occurredAt: record.occurredAt,
-        createdAt: (record as { createdAt?: Date }).createdAt ?? null,
-        metadata: record.metadata ?? {},
-      };
-    }),
-  });
+  res.json({ records: records.map((record) => serializeFinancialRecord(record, companyMap.get(record.tenantId))) });
 });
 
 export const createManualFinancialRecord = asyncHandler(async (req: Request, res: Response) => {
@@ -379,22 +446,63 @@ export const createManualFinancialRecord = asyncHandler(async (req: Request, res
     },
   });
 
-  res.status(201).json({
-    record: {
-      id: record.id,
-      tenantKey: company.tenantId,
-      organizationName: company.name,
-      organizationSlug: company.slug,
-      type: record.type,
-      amount: record.amount,
-      currency: record.currency,
-      status: record.status,
-      description: record.description,
-      referenceId: record.referenceId ?? null,
-      externalReferenceId: record.externalReferenceId ?? null,
-      occurredAt: record.occurredAt,
-      createdAt: (record as { createdAt?: Date }).createdAt ?? null,
-      metadata: record.metadata ?? {},
-    },
-  });
+  res.status(201).json({ record: serializeFinancialRecord(record, company) });
 });
+
+export const updateFinancialRecord = asyncHandler(async (req: Request, res: Response) => {
+  const { recordId } = req.params;
+  const {
+    type,
+    amount,
+    currency,
+    status,
+    description,
+    referenceId,
+    externalReferenceId,
+    occurredAt,
+  } = req.body as {
+    type?: 'subscription' | 'payment' | 'refund' | 'adjustment' | 'note';
+    amount?: number;
+    currency?: string;
+    status?: string;
+    description?: string;
+    referenceId?: string | null;
+    externalReferenceId?: string | null;
+    occurredAt?: string;
+  };
+
+  const record = await FinancialRecord.findById(recordId);
+  if (!record) {
+    throw new AppError('Financial record not found', 404, 'FINANCIAL_RECORD_NOT_FOUND');
+  }
+
+  if (type) record.type = type;
+  if (typeof amount === 'number') record.amount = amount;
+  if (currency) record.currency = currency.toUpperCase();
+  if (status) record.status = status;
+  if (description) record.description = description;
+  if (referenceId !== undefined) record.referenceId = referenceId || null;
+  if (externalReferenceId !== undefined) record.externalReferenceId = externalReferenceId || null;
+  if (occurredAt) record.occurredAt = new Date(occurredAt);
+  record.metadata = {
+    ...(record.metadata ?? {}),
+    lastEditedBy: req.user?.id ?? null,
+    lastEditedAt: new Date().toISOString(),
+  };
+
+  await record.save();
+  const company = await Company.findOne({ tenantId: record.tenantId });
+  res.json({ record: serializeFinancialRecord(record, company) });
+});
+
+export const deleteFinancialRecord = asyncHandler(async (req: Request, res: Response) => {
+  const { recordId } = req.params;
+  const record = await FinancialRecord.findById(recordId);
+  if (!record) {
+    throw new AppError('Financial record not found', 404, 'FINANCIAL_RECORD_NOT_FOUND');
+  }
+
+  await record.deleteOne();
+  res.status(204).send();
+});
+

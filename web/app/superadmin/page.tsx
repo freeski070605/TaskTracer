@@ -57,6 +57,24 @@ interface CompanySummary {
   subscription: SubscriptionSummary;
 }
 
+interface CompanyDraft {
+  organizationName: string;
+  organizationSlug: string;
+  contactEmail: string;
+  plan: string;
+  isActive: boolean;
+}
+
+interface FinancialRecordDraft {
+  type: string;
+  amount: string;
+  currency: string;
+  status: string;
+  description: string;
+  referenceId: string;
+  externalReferenceId: string;
+  occurredAt: string;
+}
 interface FinancialRecord {
   id: string;
   tenantKey: string;
@@ -86,6 +104,13 @@ const formatDate = (value?: string | null) => {
   return new Date(value).toLocaleString();
 };
 
+const toDateTimeInputValue = (value?: string | null) => {
+  if (!value) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  return date.toISOString().slice(0, 16);
+};
+
 export default function SuperadminPage() {
   const [metrics, setMetrics] = useState<MetricSummary | null>(null);
   const [companies, setCompanies] = useState<CompanySummary[]>([]);
@@ -95,6 +120,17 @@ export default function SuperadminPage() {
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [subscriptionDrafts, setSubscriptionDrafts] = useState<Record<string, { plan: string; status: string; notes: string }>>({});
+  const [companyDrafts, setCompanyDrafts] = useState<Record<string, CompanyDraft>>({});
+  const [companyForm, setCompanyForm] = useState<CompanyDraft & { tenantId: string }>({
+    organizationName: '',
+    organizationSlug: '',
+    tenantId: '',
+    contactEmail: '',
+    plan: 'starter',
+    isActive: true,
+  });
+  const [editingRecordId, setEditingRecordId] = useState<string | null>(null);
+  const [financialRecordDraft, setFinancialRecordDraft] = useState<FinancialRecordDraft | null>(null);
   const [financialForm, setFinancialForm] = useState({
     companyId: '',
     type: 'note',
@@ -120,6 +156,20 @@ export default function SuperadminPage() {
       setCompanies(companyResponse.companies);
       setSubscriptions(subscriptionResponse.subscriptions);
       setFinancialRecords(recordsResponse.records);
+      setCompanyDrafts(
+        Object.fromEntries(
+          companyResponse.companies.map((company) => [
+            company.id,
+            {
+              organizationName: company.organizationName,
+              organizationSlug: company.organizationSlug,
+              contactEmail: company.contactEmail,
+              plan: company.plan,
+              isActive: company.isActive,
+            },
+          ]),
+        ),
+      );
       setSubscriptionDrafts(
         Object.fromEntries(
           subscriptionResponse.subscriptions.map((subscription) => [
@@ -163,6 +213,68 @@ export default function SuperadminPage() {
     }
   };
 
+  const createCompany = async () => {
+    setBusyKey('company:create');
+    setError(null);
+    try {
+      await apiFetch('/superadmin/companies', {
+        method: 'POST',
+        body: JSON.stringify({
+          organizationName: companyForm.organizationName,
+          organizationSlug: companyForm.organizationSlug || undefined,
+          tenantId: companyForm.tenantId || undefined,
+          contactEmail: companyForm.contactEmail,
+          plan: companyForm.plan,
+          isActive: companyForm.isActive,
+        }),
+      });
+      setCompanyForm({
+        organizationName: '',
+        organizationSlug: '',
+        tenantId: '',
+        contactEmail: '',
+        plan: 'starter',
+        isActive: true,
+      });
+      await loadData();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to create workspace');
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  const saveCompany = async (company: CompanySummary) => {
+    const draft = companyDrafts[company.id];
+    if (!draft) return;
+
+    setBusyKey(`company:save:${company.id}`);
+    setError(null);
+    try {
+      await apiFetch(`/superadmin/companies/${company.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify(draft),
+      });
+      await loadData();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to save workspace');
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  const deleteCompany = async (company: CompanySummary) => {
+    setBusyKey(`company:delete:${company.id}`);
+    setError(null);
+    try {
+      await apiFetch(`/superadmin/companies/${company.id}`, { method: 'DELETE' });
+      await loadData();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to delete workspace');
+    } finally {
+      setBusyKey(null);
+    }
+  };
   const saveSubscription = async (company: CompanySummary) => {
     const draft = subscriptionDrafts[company.tenantKey];
     if (!draft) return;
@@ -219,6 +331,65 @@ export default function SuperadminPage() {
     }
   };
 
+  const startEditingFinancialRecord = (record: FinancialRecord) => {
+    setEditingRecordId(record.id);
+    setFinancialRecordDraft({
+      type: record.type,
+      amount: String(record.amount),
+      currency: record.currency,
+      status: record.status,
+      description: record.description,
+      referenceId: record.referenceId ?? '',
+      externalReferenceId: record.externalReferenceId ?? '',
+      occurredAt: toDateTimeInputValue(record.occurredAt),
+    });
+  };
+
+  const updateFinancialRecord = async () => {
+    if (!editingRecordId || !financialRecordDraft) return;
+
+    setBusyKey(`financial:update:${editingRecordId}`);
+    setError(null);
+    try {
+      await apiFetch(`/superadmin/financial-records/${editingRecordId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          type: financialRecordDraft.type,
+          amount: Number(financialRecordDraft.amount || '0'),
+          currency: financialRecordDraft.currency,
+          status: financialRecordDraft.status,
+          description: financialRecordDraft.description,
+          referenceId: financialRecordDraft.referenceId || null,
+          externalReferenceId: financialRecordDraft.externalReferenceId || null,
+          occurredAt: financialRecordDraft.occurredAt ? new Date(financialRecordDraft.occurredAt).toISOString() : undefined,
+        }),
+      });
+      setEditingRecordId(null);
+      setFinancialRecordDraft(null);
+      await loadData();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to update financial record');
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  const deleteFinancialRecord = async (record: FinancialRecord) => {
+    setBusyKey(`financial:delete:${record.id}`);
+    setError(null);
+    try {
+      await apiFetch(`/superadmin/financial-records/${record.id}`, { method: 'DELETE' });
+      if (editingRecordId === record.id) {
+        setEditingRecordId(null);
+        setFinancialRecordDraft(null);
+      }
+      await loadData();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to delete financial record');
+    } finally {
+      setBusyKey(null);
+    }
+  };
   const topUsageCompanies = useMemo(
     () => [...companies].sort((left, right) => right.taskCount - left.taskCount).slice(0, 5),
     [companies],
@@ -315,6 +486,67 @@ export default function SuperadminPage() {
           </>
         )}
 
+        <section className="card p-6">
+          <h2 className="text-lg font-semibold">Workspace CRUD</h2>
+          <p className="mt-1 text-sm text-slate-600">
+            Create tenant workspaces and keep organization identity, contact, plan, and availability current.
+          </p>
+          <div className="mt-4 grid gap-3 lg:grid-cols-[1.1fr_0.9fr_0.9fr_0.9fr_0.7fr_auto]">
+            <input
+              className="rounded-lg border px-3 py-2"
+              value={companyForm.organizationName}
+              onChange={(event) => setCompanyForm((current) => ({ ...current, organizationName: event.target.value }))}
+              placeholder="Organization name"
+            />
+            <input
+              className="rounded-lg border px-3 py-2"
+              value={companyForm.organizationSlug}
+              onChange={(event) => setCompanyForm((current) => ({ ...current, organizationSlug: event.target.value }))}
+              placeholder="Slug"
+            />
+            <input
+              className="rounded-lg border px-3 py-2"
+              value={companyForm.tenantId}
+              onChange={(event) => setCompanyForm((current) => ({ ...current, tenantId: event.target.value }))}
+              placeholder="Tenant key"
+            />
+            <input
+              className="rounded-lg border px-3 py-2"
+              type="email"
+              value={companyForm.contactEmail}
+              onChange={(event) => setCompanyForm((current) => ({ ...current, contactEmail: event.target.value }))}
+              placeholder="Contact email"
+            />
+            <select
+              className="rounded-lg border px-3 py-2"
+              value={companyForm.plan}
+              onChange={(event) => setCompanyForm((current) => ({ ...current, plan: event.target.value }))}
+            >
+              <option value="starter">Starter</option>
+              <option value="pro">Pro</option>
+              <option value="enterprise">Enterprise</option>
+            </select>
+            <button
+              className="btn-primary disabled:cursor-not-allowed disabled:opacity-50"
+              disabled={
+                busyKey === 'company:create' ||
+                !companyForm.organizationName.trim() ||
+                !companyForm.contactEmail.trim()
+              }
+              onClick={createCompany}
+            >
+              {busyKey === 'company:create' ? 'Creating...' : 'Create'}
+            </button>
+          </div>
+          <label className="mt-3 inline-flex items-center gap-2 text-sm text-slate-600">
+            <input
+              type="checkbox"
+              checked={companyForm.isActive}
+              onChange={(event) => setCompanyForm((current) => ({ ...current, isActive: event.target.checked }))}
+            />
+            Active on creation
+          </label>
+        </section>
         <section className="grid gap-6 xl:grid-cols-[1.25fr_0.75fr]">
           <article className="card p-6">
             <h2 className="text-lg font-semibold">Organization roster</h2>
@@ -334,38 +566,125 @@ export default function SuperadminPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {companies.map((company) => (
-                    <tr key={company.id} className="border-t border-slate-100">
-                      <td className="py-3 pr-4">
-                        <div className="font-medium">{company.organizationName}</div>
-                        <div className="text-xs text-slate-500">
-                          {company.organizationSlug} • {company.contactEmail}
-                        </div>
-                      </td>
-                      <td className="py-3 pr-4">
-                        {company.activeUserCount}/{company.userCount}
-                      </td>
-                      <td className="py-3 pr-4">
-                        <div>{company.taskCount} total</div>
-                        <div className="text-xs text-slate-500">{company.approvedTaskCount} approved</div>
-                      </td>
-                      <td className="py-3 pr-4">{formatCurrency(company.subscription.monthlyRecurringRevenue)}</td>
-                      <td className="py-3 pr-4 text-xs text-slate-500">{formatDate(company.lastActivityAt)}</td>
-                      <td className="py-3">
-                        <button
-                          className="btn-ghost disabled:cursor-not-allowed disabled:opacity-50"
-                          disabled={busyKey === `company:${company.id}`}
-                          onClick={() => toggleWorkspaceStatus(company)}
-                        >
-                          {busyKey === `company:${company.id}`
-                            ? 'Saving...'
-                            : company.isActive
-                              ? 'Suspend workspace'
-                              : 'Reactivate workspace'}
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
+                  {companies.map((company) => {
+                    const draft = companyDrafts[company.id] ?? {
+                      organizationName: company.organizationName,
+                      organizationSlug: company.organizationSlug,
+                      contactEmail: company.contactEmail,
+                      plan: company.plan,
+                      isActive: company.isActive,
+                    };
+
+                    return (
+                      <tr key={company.id} className="border-t border-slate-100 align-top">
+                        <td className="py-3 pr-4">
+                          <div className="grid min-w-[260px] gap-2">
+                            <input
+                              className="rounded-lg border px-3 py-2"
+                              value={draft.organizationName}
+                              onChange={(event) =>
+                                setCompanyDrafts((current) => ({
+                                  ...current,
+                                  [company.id]: { ...draft, organizationName: event.target.value },
+                                }))
+                              }
+                            />
+                            <div className="grid gap-2 md:grid-cols-2">
+                              <input
+                                className="rounded-lg border px-3 py-2"
+                                value={draft.organizationSlug}
+                                onChange={(event) =>
+                                  setCompanyDrafts((current) => ({
+                                    ...current,
+                                    [company.id]: { ...draft, organizationSlug: event.target.value },
+                                  }))
+                                }
+                              />
+                              <input
+                                className="rounded-lg border px-3 py-2"
+                                type="email"
+                                value={draft.contactEmail}
+                                onChange={(event) =>
+                                  setCompanyDrafts((current) => ({
+                                    ...current,
+                                    [company.id]: { ...draft, contactEmail: event.target.value },
+                                  }))
+                                }
+                              />
+                            </div>
+                            <div className="grid gap-2 md:grid-cols-[1fr_auto]">
+                              <select
+                                className="rounded-lg border px-3 py-2"
+                                value={draft.plan}
+                                onChange={(event) =>
+                                  setCompanyDrafts((current) => ({
+                                    ...current,
+                                    [company.id]: { ...draft, plan: event.target.value },
+                                  }))
+                                }
+                              >
+                                <option value="starter">Starter</option>
+                                <option value="pro">Pro</option>
+                                <option value="enterprise">Enterprise</option>
+                              </select>
+                              <label className="inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-slate-600">
+                                <input
+                                  type="checkbox"
+                                  checked={draft.isActive}
+                                  onChange={(event) =>
+                                    setCompanyDrafts((current) => ({
+                                      ...current,
+                                      [company.id]: { ...draft, isActive: event.target.checked },
+                                    }))
+                                  }
+                                />
+                                Active
+                              </label>
+                            </div>
+                            <div className="text-xs text-slate-500">Tenant key: {company.tenantKey}</div>
+                          </div>
+                        </td>
+                        <td className="py-3 pr-4">
+                          {company.activeUserCount}/{company.userCount}
+                        </td>
+                        <td className="py-3 pr-4">
+                          <div>{company.taskCount} total</div>
+                          <div className="text-xs text-slate-500">{company.approvedTaskCount} approved</div>
+                        </td>
+                        <td className="py-3 pr-4">{formatCurrency(company.subscription.monthlyRecurringRevenue)}</td>
+                        <td className="py-3 pr-4 text-xs text-slate-500">{formatDate(company.lastActivityAt)}</td>
+                        <td className="py-3">
+                          <div className="flex min-w-[190px] flex-col gap-2">
+                            <button
+                              className="btn-primary disabled:cursor-not-allowed disabled:opacity-50"
+                              disabled={busyKey === `company:save:${company.id}`}
+                              onClick={() => saveCompany(company)}
+                            >
+                              {busyKey === `company:save:${company.id}` ? 'Saving...' : 'Save edits'}
+                            </button>
+                            <button
+                              className="btn-ghost disabled:cursor-not-allowed disabled:opacity-50"
+                              disabled={busyKey === `company:${company.id}`}
+                              onClick={() => toggleWorkspaceStatus(company)}
+                            >
+                              {busyKey === `company:${company.id}`
+                                ? 'Saving...'
+                                : company.isActive
+                                  ? 'Suspend workspace'
+                                  : 'Reactivate workspace'}
+                            </button>
+                            <button
+                              className="rounded-lg border border-red-200 px-4 py-2 text-red-700 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50"
+                              disabled={busyKey === `company:delete:${company.id}`}
+                              onClick={() => deleteCompany(company)}
+                            >
+                              {busyKey === `company:delete:${company.id}` ? 'Deleting...' : 'Delete empty workspace'}
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -560,26 +879,140 @@ export default function SuperadminPage() {
           <article className="card p-6">
             <h2 className="text-lg font-semibold">Financial ledger</h2>
             <div className="mt-4 grid gap-3">
-              {financialRecords.map((record) => (
-                <div key={record.id} className="rounded-2xl border border-slate-100 bg-white/80 p-4">
-                  <div className="flex flex-wrap items-center justify-between gap-3">
-                    <div>
-                      <div className="font-medium text-slate-900">{record.organizationName}</div>
-                      <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
-                        {record.type} • {record.status}
+              {financialRecords.map((record) => {
+                const isEditing = editingRecordId === record.id && financialRecordDraft;
+
+                return (
+                  <div key={record.id} className="rounded-2xl border border-slate-100 bg-white/80 p-4">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div>
+                        <div className="font-medium text-slate-900">{record.organizationName}</div>
+                        <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
+                          {record.type} / {record.status}
+                        </div>
+                      </div>
+                      <div className="text-right">
+                        <div className="font-semibold text-brand-700">{formatCurrency(record.amount, record.currency)}</div>
+                        <div className="text-xs text-slate-500">{formatDate(record.occurredAt)}</div>
                       </div>
                     </div>
-                    <div className="text-right">
-                      <div className="font-semibold text-brand-700">{formatCurrency(record.amount, record.currency)}</div>
-                      <div className="text-xs text-slate-500">{formatDate(record.occurredAt)}</div>
-                    </div>
+
+                    {isEditing ? (
+                      <div className="mt-4 grid gap-3">
+                        <div className="grid gap-3 md:grid-cols-3">
+                          <select
+                            className="rounded-lg border px-3 py-2"
+                            value={financialRecordDraft.type}
+                            onChange={(event) =>
+                              setFinancialRecordDraft((current) => current && { ...current, type: event.target.value })
+                            }
+                          >
+                            <option value="note">Note</option>
+                            <option value="payment">Payment</option>
+                            <option value="refund">Refund</option>
+                            <option value="adjustment">Adjustment</option>
+                            <option value="subscription">Subscription</option>
+                          </select>
+                          <input
+                            className="rounded-lg border px-3 py-2"
+                            type="number"
+                            min="0"
+                            step="0.01"
+                            value={financialRecordDraft.amount}
+                            onChange={(event) =>
+                              setFinancialRecordDraft((current) => current && { ...current, amount: event.target.value })
+                            }
+                          />
+                          <input
+                            className="rounded-lg border px-3 py-2"
+                            value={financialRecordDraft.currency}
+                            onChange={(event) =>
+                              setFinancialRecordDraft((current) => current && { ...current, currency: event.target.value.toUpperCase() })
+                            }
+                          />
+                        </div>
+                        <div className="grid gap-3 md:grid-cols-3">
+                          <input
+                            className="rounded-lg border px-3 py-2"
+                            value={financialRecordDraft.status}
+                            onChange={(event) =>
+                              setFinancialRecordDraft((current) => current && { ...current, status: event.target.value })
+                            }
+                          />
+                          <input
+                            className="rounded-lg border px-3 py-2"
+                            value={financialRecordDraft.referenceId}
+                            onChange={(event) =>
+                              setFinancialRecordDraft((current) => current && { ...current, referenceId: event.target.value })
+                            }
+                            placeholder="Reference ID"
+                          />
+                          <input
+                            className="rounded-lg border px-3 py-2"
+                            value={financialRecordDraft.externalReferenceId}
+                            onChange={(event) =>
+                              setFinancialRecordDraft((current) => current && { ...current, externalReferenceId: event.target.value })
+                            }
+                            placeholder="External ID"
+                          />
+                        </div>
+                        <input
+                          className="rounded-lg border px-3 py-2"
+                          type="datetime-local"
+                          value={financialRecordDraft.occurredAt}
+                          onChange={(event) =>
+                            setFinancialRecordDraft((current) => current && { ...current, occurredAt: event.target.value })
+                          }
+                        />
+                        <textarea
+                          className="min-h-[96px] rounded-lg border px-3 py-2"
+                          value={financialRecordDraft.description}
+                          onChange={(event) =>
+                            setFinancialRecordDraft((current) => current && { ...current, description: event.target.value })
+                          }
+                        />
+                        <div className="flex flex-wrap gap-2">
+                          <button
+                            className="btn-primary disabled:cursor-not-allowed disabled:opacity-50"
+                            disabled={busyKey === `financial:update:${record.id}` || !financialRecordDraft.description.trim()}
+                            onClick={updateFinancialRecord}
+                          >
+                            {busyKey === `financial:update:${record.id}` ? 'Saving...' : 'Save record'}
+                          </button>
+                          <button
+                            className="btn-ghost"
+                            onClick={() => {
+                              setEditingRecordId(null);
+                              setFinancialRecordDraft(null);
+                            }}
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <>
+                        <p className="mt-3 text-sm text-slate-600">{record.description}</p>
+                        <div className="mt-3 text-xs text-slate-500">
+                          Ref: {record.referenceId ?? 'n/a'} / External: {record.externalReferenceId ?? 'n/a'}
+                        </div>
+                        <div className="mt-4 flex flex-wrap gap-2">
+                          <button className="btn-ghost" onClick={() => startEditingFinancialRecord(record)}>
+                            Edit
+                          </button>
+                          <button
+                            className="rounded-lg border border-red-200 px-4 py-2 text-red-700 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50"
+                            disabled={busyKey === `financial:delete:${record.id}`}
+                            onClick={() => deleteFinancialRecord(record)}
+                          >
+                            {busyKey === `financial:delete:${record.id}` ? 'Deleting...' : 'Delete'}
+                          </button>
+                        </div>
+                      </>
+                    )}
                   </div>
-                  <p className="mt-3 text-sm text-slate-600">{record.description}</p>
-                  <div className="mt-3 text-xs text-slate-500">
-                    Ref: {record.referenceId ?? 'n/a'} • External: {record.externalReferenceId ?? 'n/a'}
-                  </div>
-                </div>
-              ))}
+                );
+              })}
               {financialRecords.length === 0 && (
                 <div className="rounded-2xl border border-dashed border-slate-200 px-4 py-6 text-sm text-slate-500">
                   No financial records have been captured yet.
@@ -592,3 +1025,4 @@ export default function SuperadminPage() {
     </AppShell>
   );
 }
+
